@@ -20,29 +20,49 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "5171260626"))
 
 print(f"[CRON DEBUG] BOT_TOKEN exists: {bool(BOT_TOKEN)}, DATABASE_URL exists: {bool(DATABASE_URL)}")
 
-# Список каналов для парсинга
+# Список каналов/чатов для парсинга (чаты с заказами и просьбами)
 CHANNELS = [
-    "devjobs", "fordev", "freelancetaverna", "remote_it", "web_work",
-    "frontend_jobs", "backend_jobs_ru", "nodejs_jobs", "react_jobs",
-    "python_jobs_ru", "fullstack_jobs", "geekjob", "javascript_jobs",
-    "vuejs_jobs", "php_jobs", "telegram_bot_dev", "freelance_ru"
+    # Чаты фрилансеров и заказчиков
+    "freelancetaverna", "freelance_ru", "fordev",
+    # Чаты разработчиков где просят помощь
+    "webdev_chat", "frontend_ru", "ru_python", "nodejs_ru",
+    "php_chat", "laravel_rus", "react_js", "vuejs_ru",
+    # Telegram боты
+    "botoid", "taboroid", "aiaboroid",
+    # Общие IT чаты
+    "pro_web", "it_freelance", "devs_chat"
 ]
 
-# Ключевые слова
+# Ключевые слова - что ищем
 KEYWORDS = {
-    "web": ["сайт", "веб", "web", "frontend", "backend", "react", "vue", "node", "php", "laravel", "wordpress", "django", "html", "css", "javascript", "typescript", "верстка", "landing"],
-    "bots": ["бот", "bot", "telegram", "телеграм", "discord", "aiogram", "pyrogram", "автоматизация"],
-    "fullstack": ["fullstack", "фулстек", "разработчик", "developer", "программист"],
+    "web": ["сайт", "веб", "web", "лендинг", "landing", "верстка", "страниц", "wordpress", "интернет-магазин"],
+    "bots": ["бот", "bot", "телеграм", "telegram", "discord", "автоматизац", "парсер", "parser"],
+    "dev": ["скрипт", "программ", "приложени", "доработ", "исправ", "функци", "api", "интеграц"],
 }
 
 STOP_WORDS = [
     "менеджер", "manager", "hr", "recruiter", "продажи", "sales", "маркетолог",
     # Игровая разработка - исключаем
     "игр", "game", "gaming", "unity", "unreal", "godot", "gamedev", "геймдев",
-    "3d модел", "3d artist", "левел дизайн", "level design", "игровой движок"
+    "3d модел", "3d artist", "левел дизайн", "level design", "игровой движок",
+    # Исключаем вакансии (ищем заказы, а не работу в штат)
+    "вакансия", "vacancy", "в штат", "офис", "full-time", "трудоустройство"
 ]
 
-SIMILARITY_THRESHOLD = 0.7
+# Индикаторы просьб о помощи/заказов
+REQUEST_INDICATORS = [
+    # Просьбы
+    "помогите", "помоги", "нужна помощь", "кто может", "кто сможет", 
+    "кто возьмется", "кто возьмётся", "посоветуйте", "подскажите",
+    # Заказы
+    "нужен", "нужна", "нужно", "ищу", "ищем", "требуется",
+    "сделать", "сделайте", "создать", "разработать", "написать",
+    # Доработка
+    "доработать", "доработка", "исправить", "починить", "пофиксить",
+    "добавить функци", "изменить", "переделать", "улучшить",
+    # Оплата
+    "оплачу", "заплачу", "бюджет", "за вознаграждение", "платно", "$", "₽", "руб"
+]
 
 
 async def parse_channel(session: aiohttp.ClientSession, channel: str):
@@ -91,14 +111,16 @@ def clean_html(html: str) -> str:
     return text
 
 
-def is_job_posting(text: str):
-    """Проверка на вакансию"""
+def is_help_request(text: str):
+    """Проверка на запрос помощи/заказ"""
     text_lower = text.lower()
     
+    # Проверяем стоп-слова
     for stop in STOP_WORDS:
         if stop.lower() in text_lower:
             return False, []
     
+    # Ищем ключевые слова (что нужно сделать)
     found = []
     for cat, words in KEYWORDS.items():
         for w in words:
@@ -109,10 +131,10 @@ def is_job_posting(text: str):
     if not found:
         return False, []
     
-    indicators = ["ищем", "ищу", "требуется", "нужен", "вакансия", "работа", "оплата", "бюджет", "удалённо", "remote", "фриланс", "проект", "заказ"]
-    has_indicator = any(ind in text_lower for ind in indicators)
+    # Проверяем индикаторы просьбы/заказа
+    has_request = any(ind in text_lower for ind in REQUEST_INDICATORS)
     
-    return has_indicator, list(set(found))
+    return has_request, list(set(found))
 
 
 def calc_hash(text: str) -> str:
@@ -146,8 +168,8 @@ async def run_parsing():
             for result in results:
                 if isinstance(result, list):
                     for msg in result:
-                        is_job, keywords = is_job_posting(msg["text"])
-                        if is_job:
+                        is_request, keywords = is_help_request(msg["text"])
+                        if is_request:
                             msg["keywords"] = keywords
                             msg["text_hash"] = calc_hash(msg["text"])
                             all_jobs.append(msg)
@@ -217,7 +239,7 @@ async def run_parsing():
             bot = Bot(token=BOT_TOKEN)
             
             # Отправляем заголовок
-            header = f"📋 <b>Найдено {len(new_jobs)} новых вакансий</b>\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+            header = f"📋 <b>Найдено {len(new_jobs)} новых заказов/запросов</b>\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
             await bot.send_message(ADMIN_ID, header, parse_mode="HTML")
             
             # Отправляем вакансии (макс 10)
@@ -230,7 +252,7 @@ async def run_parsing():
                     print(f"[CRON] Send error: {e}")
             
             if len(new_jobs) > 10:
-                await bot.send_message(ADMIN_ID, f"...и ещё {len(new_jobs) - 10} вакансий")
+                await bot.send_message(ADMIN_ID, f"...и ещё {len(new_jobs) - 10} заказов")
             
             await bot.session.close()
         
