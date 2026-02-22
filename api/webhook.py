@@ -76,14 +76,13 @@ def create_router() -> Router:
     async def cmd_parse(message: Message):
         if message.from_user.id != ADMIN_ID:
             return
-        await message.answer("🔄 Запускаю парсинг... Это может занять 1-2 минуты.")
+        await message.answer("🔄 Запускаю парсинг...")
         
         try:
             import aiohttp
             async with aiohttp.ClientSession() as session:
-                base_url = os.getenv("VERCEL_URL", "botmonitorinaraboty.vercel.app")
-                url = f"https://{base_url}/api/cron"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                url = "https://botmonitorinaraboty.vercel.app/api/cron"
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
                     result = await resp.json()
                     await message.answer(
                         f"✅ Парсинг завершён!\n\n"
