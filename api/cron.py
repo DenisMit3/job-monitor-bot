@@ -234,27 +234,29 @@ async def run_parsing():
         
         print(f"[CRON] New jobs: {len(new_jobs)}")
         
-        # Отправляем в Telegram
-        if new_jobs:
-            bot = Bot(token=BOT_TOKEN)
-            
+        # Отправляем в Telegram ВСЕ найденные (не только новые)
+        bot = Bot(token=BOT_TOKEN)
+        
+        if all_jobs:
             # Отправляем заголовок
-            header = f"📋 <b>Найдено {len(new_jobs)} новых заказов/запросов</b>\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+            header = f"📋 <b>Парсинг завершён</b>\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+            header += f"🔍 Найдено: {len(all_jobs)}\n"
+            header += f"🆕 Новых: {len(new_jobs)}"
             await bot.send_message(ADMIN_ID, header, parse_mode="HTML")
             
-            # Отправляем вакансии (макс 10)
-            for job in new_jobs[:10]:
-                text = job["text"][:600] + "..." if len(job["text"]) > 600 else job["text"]
-                msg = f"📌 {text}\n\n🏷 {', '.join(job['keywords'])}\n📢 <a href=\"{job['url']}\">Источник</a>"
+            # Отправляем заказы (макс 5)
+            jobs_to_show = new_jobs[:5] if new_jobs else all_jobs[:5]
+            for job in jobs_to_show:
+                text = job["text"][:500] + "..." if len(job["text"]) > 500 else job["text"]
+                msg = f"📌 {text}\n\n🏷 {', '.join(job.get('keywords', []))}\n📢 <a href=\"{job['url']}\">Источник</a>"
                 try:
                     await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
                 except Exception as e:
                     print(f"[CRON] Send error: {e}")
-            
-            if len(new_jobs) > 10:
-                await bot.send_message(ADMIN_ID, f"...и ещё {len(new_jobs) - 10} заказов")
-            
-            await bot.session.close()
+        else:
+            await bot.send_message(ADMIN_ID, "📭 Заказов не найдено в указанных каналах")
+        
+        await bot.session.close()
         
         return {"parsed": len(all_jobs), "new": len(new_jobs), "status": "success"}
     
