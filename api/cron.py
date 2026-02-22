@@ -35,7 +35,12 @@ KEYWORDS = {
     "fullstack": ["fullstack", "фулстек", "разработчик", "developer", "программист"],
 }
 
-STOP_WORDS = ["менеджер", "manager", "hr", "recruiter", "продажи", "sales", "маркетолог"]
+STOP_WORDS = [
+    "менеджер", "manager", "hr", "recruiter", "продажи", "sales", "маркетолог",
+    # Игровая разработка - исключаем
+    "игр", "game", "gaming", "unity", "unreal", "godot", "gamedev", "геймдев",
+    "3d модел", "3d artist", "левел дизайн", "level design", "игровой движок"
+]
 
 SIMILARITY_THRESHOLD = 0.7
 
