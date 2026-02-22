@@ -22,15 +22,22 @@ print(f"[CRON DEBUG] BOT_TOKEN exists: {bool(BOT_TOKEN)}, DATABASE_URL exists: {
 
 # Список каналов/чатов для парсинга (чаты с заказами и просьбами)
 CHANNELS = [
-    # Чаты фрилансеров и заказчиков
-    "freelancetaverna", "freelance_ru", "fordev",
-    # Чаты разработчиков где просят помощь
-    "webdev_chat", "frontend_ru", "ru_python", "nodejs_ru",
-    "php_chat", "laravel_rus", "react_js", "vuejs_ru",
+    # Фриланс биржи и заказы
+    "freelancetaverna",
+    "fl_ru_chat", 
+    "freelanceru",
+    "zakazy_freelance",
+    # Чаты разработчиков (где просят помощь)
+    "webdev_ru",
+    "frontend_ru", 
+    "js_ru",
+    "python_ru",
+    "php_ru",
     # Telegram боты
-    "botoid", "taboroid", "aiaboroid",
-    # Общие IT чаты
-    "pro_web", "it_freelance", "devs_chat"
+    "botoid",
+    # Заказы на разработку
+    "it_orders",
+    "dev_orders",
 ]
 
 # Ключевые слова - что ищем
@@ -159,11 +166,13 @@ async def run_parsing():
     
     # Парсим каналы
     all_jobs = []
+    all_results = []
     async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
         for i in range(0, len(CHANNELS), 3):
             batch = CHANNELS[i:i+3]
             tasks = [parse_channel(session, ch) for ch in batch]
             results = await asyncio.gather(*tasks, return_exceptions=True)
+            all_results.extend(results)
             
             for result in results:
                 if isinstance(result, list):
@@ -176,10 +185,16 @@ async def run_parsing():
             
             await asyncio.sleep(0.5)
     
-    print(f"[CRON] Parsed {len(all_jobs)} potential jobs")
+    total_parsed = sum(len(r) for r in all_results if isinstance(r, list))
+    print(f"[CRON] Total parsed: {total_parsed}, passed filter: {len(all_jobs)}")
     
     if not all_jobs:
-        return {"parsed": 0, "new": 0, "status": "no jobs found"}
+        # Отправим сообщение что ничего не найдено
+        if BOT_TOKEN:
+            bot = Bot(token=BOT_TOKEN)
+            await bot.send_message(ADMIN_ID, f"📭 Заказов не найдено\n\nСпарсено сообщений: {total_parsed}\nПрошло фильтр: 0")
+            await bot.session.close()
+        return {"parsed": total_parsed, "new": 0, "status": "no jobs found"}
     
     # Работа с БД
     try:
@@ -240,7 +255,8 @@ async def run_parsing():
         if all_jobs:
             # Отправляем заголовок
             header = f"📋 <b>Парсинг завершён</b>\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-            header += f"🔍 Найдено: {len(all_jobs)}\n"
+            header += f"📥 Спарсено сообщений: {total_parsed}\n"
+            header += f"🔍 Прошло фильтр: {len(all_jobs)}\n"
             header += f"🆕 Новых: {len(new_jobs)}"
             await bot.send_message(ADMIN_ID, header, parse_mode="HTML")
             
@@ -254,7 +270,7 @@ async def run_parsing():
                 except Exception as e:
                     print(f"[CRON] Send error: {e}")
         else:
-            await bot.send_message(ADMIN_ID, "📭 Заказов не найдено в указанных каналах")
+            await bot.send_message(ADMIN_ID, f"📭 Заказов не найдено\n\nСпарсено сообщений: {total_parsed}\nПрошло фильтр: 0\n\nВозможно каналы недоступны или нет подходящих сообщений")
         
         await bot.session.close()
         
