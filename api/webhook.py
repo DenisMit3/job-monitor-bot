@@ -4,24 +4,24 @@ Vercel Serverless Function - Webhook для Telegram бота
 import json
 import asyncio
 import os
-import sys
 
-# Добавляем корень проекта в путь
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Update, Message
 from aiogram.filters import Command
+from http.server import BaseHTTPRequestHandler
 
 # Конфигурация
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8566523315:AAGso2hEaVPX-kvjR40VDZvwk011vfRaUP0")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5171260626"))
+
+print(f"[DEBUG H2] BOT_TOKEN exists: {bool(BOT_TOKEN)}, ADMIN_ID: {ADMIN_ID}")
 
 # Создаём роутер
 router = Router()
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
+    print(f"[DEBUG H2] cmd_start: user_id={message.from_user.id}, admin_id={ADMIN_ID}")
     if message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Бот доступен только администратору")
         return
@@ -38,81 +38,53 @@ async def cmd_start(message: Message):
         "/help - Помощь",
         parse_mode="HTML"
     )
+    print("[DEBUG H4] cmd_start: message sent successfully")
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
+    print(f"[DEBUG] cmd_help called by {message.from_user.id}")
     if message.from_user.id != ADMIN_ID:
         return
-    
     await message.answer(
         "📖 <b>Справка</b>\n\n"
-        "Бот автоматически парсит IT-каналы каждый день в 12:00 МСК "
-        "и присылает дайджест новых вакансий.\n\n"
-        "🔍 <b>Фильтрация:</b>\n"
-        "- Веб-разработка (React, Vue, Node, PHP...)\n"
-        "- Telegram боты\n"
-        "- Fullstack разработка\n"
-        "- DevOps, Mobile, ML/AI\n\n"
-        "🔄 <b>Дедупликация:</b>\n"
-        "Похожие вакансии из разных каналов объединяются.",
+        "Бот автоматически парсит IT-каналы каждый день в 12:00 МСК.",
         parse_mode="HTML"
     )
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
+    print(f"[DEBUG] cmd_stats called by {message.from_user.id}")
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer("📊 Статистика пока недоступна - база данных инициализируется")
+    await message.answer("📊 Статистика: функция в разработке")
 
 @router.message(Command("digest"))
 async def cmd_digest(message: Message):
+    print(f"[DEBUG] cmd_digest called by {message.from_user.id}")
     if message.from_user.id != ADMIN_ID:
         return
-    await message.answer("📋 Используйте /parse для запуска парсинга вакансий")
+    await message.answer("📋 Используйте /parse для запуска парсинга")
 
 @router.message(Command("channels"))
 async def cmd_channels(message: Message):
+    print(f"[DEBUG] cmd_channels called by {message.from_user.id}")
     if message.from_user.id != ADMIN_ID:
         return
-    
-    channels = [
-        "devjobs", "fordev", "freelancetaverna", "remote_it", 
-        "web_work", "frontend_jobs", "backend_jobs_ru", "nodejs_jobs",
-        "react_jobs", "python_jobs_ru", "fullstack_jobs", "geekjob"
-    ]
-    
-    channels_list = "\n".join([f"• @{ch}" for ch in channels])
-    
     await message.answer(
-        f"📢 <b>Каналы для мониторинга</b>\n\n{channels_list}\n\n...и другие (50+ каналов)",
+        "📢 <b>Каналы:</b>\n• @devjobs\n• @fordev\n• @freelancetaverna\n...и 50+ других",
         parse_mode="HTML"
     )
 
 @router.message(Command("parse"))
 async def cmd_parse(message: Message):
+    print(f"[DEBUG] cmd_parse called by {message.from_user.id}")
     if message.from_user.id != ADMIN_ID:
         return
-    
-    await message.answer("🔄 Запускаю парсинг... Это может занять 1-2 минуты.")
-    
-    # Вызываем cron endpoint
-    try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            base_url = os.getenv("VERCEL_URL", "botmonitorinaraboty.vercel.app")
-            url = f"https://{base_url}/api/cron"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                result = await resp.json()
-                await message.answer(
-                    f"✅ Парсинг завершён!\n\n"
-                    f"📊 Обработано: {result.get('parsed', 0)}\n"
-                    f"🆕 Новых: {result.get('new', 0)}"
-                )
-    except Exception as e:
-        await message.answer(f"❌ Ошибка парсинга: {str(e)[:200]}")
+    await message.answer("🔄 Парсинг временно недоступен. Функция в разработке.")
 
 @router.message()
 async def any_message(message: Message):
+    print(f"[DEBUG] any_message called by {message.from_user.id}")
     if message.from_user.id != ADMIN_ID:
         return
     await message.answer("Используйте /help для списка команд")
@@ -120,60 +92,58 @@ async def any_message(message: Message):
 
 async def process_update(update_data: dict):
     """Обработка входящего обновления"""
+    print(f"[DEBUG H3] process_update started, keys: {list(update_data.keys())}")
+    
+    if not BOT_TOKEN:
+        print("[DEBUG H1] ERROR: BOT_TOKEN is None!")
+        return
+    
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
     
     try:
         update = Update(**update_data)
+        print(f"[DEBUG H3] Update parsed: id={update.update_id}")
         await dp.feed_update(bot, update)
+        print("[DEBUG H4] feed_update completed")
+    except Exception as e:
+        print(f"[DEBUG H1] ERROR in process_update: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         await bot.session.close()
 
 
-class handler:
-    def __init__(self, request):
-        self.request = request
-    
-    async def handle_post(self):
-        try:
-            body = await self.request.body()
-            update_data = json.loads(body.decode('utf-8'))
-            await process_update(update_data)
-            return {"statusCode": 200, "body": json.dumps({"ok": True})}
-        except Exception as e:
-            print(f"Webhook error: {e}")
-            return {"statusCode": 200, "body": json.dumps({"ok": True, "error": str(e)})}
-    
-    async def handle_get(self):
-        return {"statusCode": 200, "body": json.dumps({"status": "Bot webhook is active"})}
-
-
-# Vercel handler
-from http.server import BaseHTTPRequestHandler
-
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        print(f"[DEBUG H5] POST received, path: {self.path}")
+        
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length)
         
         try:
             update_data = json.loads(body.decode('utf-8'))
+            print(f"[DEBUG H5] Body parsed, has_message: {'message' in update_data}")
+            
             asyncio.run(process_update(update_data))
             
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({"ok": True}).encode())
+            self.wfile.write(b'{"ok":true}')
+            print("[DEBUG] Response sent 200")
         except Exception as e:
-            print(f"Webhook error: {e}")
+            print(f"[DEBUG H1] EXCEPTION in do_POST: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({"ok": True}).encode())
+            self.wfile.write(b'{"ok":true}')
     
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
-        self.wfile.write(json.dumps({"status": "Bot webhook is active"}).encode())
+        self.wfile.write(b'{"status":"active"}')
