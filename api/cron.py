@@ -3,301 +3,273 @@ Vercel Cron Job - Парсинг каналов и отправка дайдже
 """
 import json
 import asyncio
-import os
-import re
-import hashlib
-import aiohttp
-import asyncpg
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler
-from datetime import datetime, timedelta
-from difflib import SequenceMatcher
+from urllib.parse import urlparse, parse_qs
+
+import asyncpg
 from aiogram import Bot
 
-# Конфигурация
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5171260626"))
-
-print(f"[CRON DEBUG] BOT_TOKEN exists: {bool(BOT_TOKEN)}, DATABASE_URL exists: {bool(DATABASE_URL)}")
-
-# Список каналов/чатов для парсинга (чаты с заказами и просьбами)
-CHANNELS = [
-    # Фриланс биржи и заказы
-    "freelancetaverna",
-    "fl_ru_chat", 
-    "freelanceru",
-    "zakazy_freelance",
-    # Чаты разработчиков (где просят помощь)
-    "webdev_ru",
-    "frontend_ru", 
-    "js_ru",
-    "python_ru",
-    "php_ru",
-    # Telegram боты
-    "botoid",
-    # Заказы на разработку
-    "it_orders",
-    "dev_orders",
-]
-
-# Ключевые слова - что ищем
-KEYWORDS = {
-    "web": ["сайт", "веб", "web", "лендинг", "landing", "верстка", "страниц", "wordpress", "интернет-магазин"],
-    "bots": ["бот", "bot", "телеграм", "telegram", "discord", "автоматизац", "парсер", "parser"],
-    "dev": ["скрипт", "программ", "приложени", "доработ", "исправ", "функци", "api", "интеграц"],
-}
-
-STOP_WORDS = [
-    "менеджер", "manager", "hr", "recruiter", "продажи", "sales", "маркетолог",
-    # Игровая разработка - исключаем
-    "игр", "game", "gaming", "unity", "unreal", "godot", "gamedev", "геймдев",
-    "3d модел", "3d artist", "левел дизайн", "level design", "игровой движок",
-    # Исключаем вакансии (ищем заказы, а не работу в штат)
-    "вакансия", "vacancy", "в штат", "офис", "full-time", "трудоустройство"
-]
-
-# Индикаторы просьб о помощи/заказов
-REQUEST_INDICATORS = [
-    # Просьбы
-    "помогите", "помоги", "нужна помощь", "кто может", "кто сможет", 
-    "кто возьмется", "кто возьмётся", "посоветуйте", "подскажите",
-    # Заказы
-    "нужен", "нужна", "нужно", "ищу", "ищем", "требуется",
-    "сделать", "сделайте", "создать", "разработать", "написать",
-    # Доработка
-    "доработать", "доработка", "исправить", "починить", "пофиксить",
-    "добавить функци", "изменить", "переделать", "улучшить",
-    # Оплата
-    "оплачу", "заплачу", "бюджет", "за вознаграждение", "платно", "$", "₽", "руб"
-]
+from src.config import BOT_TOKEN, DATABASE_URL, ADMIN_ID, SIMILARITY_THRESHOLD, CHANNELS
+from src.database import Database
+from src.parser import TelegramParser
 
 
-async def parse_channel(session: aiohttp.ClientSession, channel: str):
-    """Парсинг одного канала"""
-    url = f"https://t.me/s/{channel}"
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status != 200:
-                return []
-            html = await resp.text()
-            return parse_html(html, channel)
-    except Exception as e:
-        print(f"[CRON] Error parsing {channel}: {e}")
-        return []
+async def get_recipients() -> list[int]:
+    """Получаем список получателей уведомлений."""
+    recipients = [ADMIN_ID]
 
-
-def parse_html(html: str, channel: str):
-    """Парсинг HTML"""
-    messages = []
-    text_pattern = r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>'
-    post_pattern = r'data-post="([^"]+)"'
-    
-    posts = re.findall(post_pattern, html)
-    texts = re.findall(text_pattern, html, re.DOTALL)
-    
-    for i, post_id in enumerate(posts[-15:]):
-        if i < len(texts):
-            text = clean_html(texts[i])
-            if text and len(text) > 50:
-                message_id = int(post_id.split('/')[-1]) if '/' in post_id else 0
-                messages.append({
-                    "message_id": message_id,
-                    "channel": channel,
-                    "text": text,
-                    "url": f"https://t.me/{post_id}"
-                })
-    return messages
-
-
-def clean_html(html: str) -> str:
-    """Очистка HTML"""
-    text = re.sub(r'<br\s*/?>', '\n', html)
-    text = re.sub(r'<[^>]+>', '', text)
-    text = text.replace('&nbsp;', ' ').replace('&amp;', '&')
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-
-
-def is_help_request(text: str):
-    """Проверка на запрос помощи/заказ"""
-    text_lower = text.lower()
-    
-    # Проверяем стоп-слова
-    for stop in STOP_WORDS:
-        if stop.lower() in text_lower:
-            return False, []
-    
-    # Ищем ключевые слова (что нужно сделать)
-    found = []
-    for cat, words in KEYWORDS.items():
-        for w in words:
-            if w.lower() in text_lower:
-                found.append(cat)
-                break
-    
-    if not found:
-        return False, []
-    
-    # Проверяем индикаторы просьбы/заказа
-    has_request = any(ind in text_lower for ind in REQUEST_INDICATORS)
-    
-    return has_request, list(set(found))
-
-
-def calc_hash(text: str) -> str:
-    normalized = re.sub(r'\s+', ' ', text.lower().strip())
-    normalized = re.sub(r'\d+', '', normalized)
-    return hashlib.md5(normalized.encode()).hexdigest()
-
-
-def is_similar(text1: str, text2: str) -> bool:
-    return SequenceMatcher(None, text1.lower(), text2.lower()).ratio() > SIMILARITY_THRESHOLD
-
-
-async def run_parsing():
-    """Основная функция парсинга"""
-    print("[CRON] Starting parsing...")
-    
     if not DATABASE_URL:
-        return {"error": "DATABASE_URL not set", "parsed": 0, "new": 0}
-    
-    if not BOT_TOKEN:
-        return {"error": "BOT_TOKEN not set", "parsed": 0, "new": 0}
-    
-    # Парсим каналы
-    all_jobs = []
-    all_results = []
-    async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-        for i in range(0, len(CHANNELS), 3):
-            batch = CHANNELS[i:i+3]
-            tasks = [parse_channel(session, ch) for ch in batch]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            all_results.extend(results)
-            
-            for result in results:
-                if isinstance(result, list):
-                    for msg in result:
-                        is_request, keywords = is_help_request(msg["text"])
-                        if is_request:
-                            msg["keywords"] = keywords
-                            msg["text_hash"] = calc_hash(msg["text"])
-                            all_jobs.append(msg)
-            
-            await asyncio.sleep(0.5)
-    
-    total_parsed = sum(len(r) for r in all_results if isinstance(r, list))
-    print(f"[CRON] Total parsed: {total_parsed}, passed filter: {len(all_jobs)}")
-    
-    if not all_jobs:
-        # Отправим сообщение что ничего не найдено
-        if BOT_TOKEN:
-            bot = Bot(token=BOT_TOKEN)
-            await bot.send_message(ADMIN_ID, f"📭 Заказов не найдено\n\nСпарсено сообщений: {total_parsed}\nПрошло фильтр: 0")
-            await bot.session.close()
-        return {"parsed": total_parsed, "new": 0, "status": "no jobs found"}
-    
-    # Работа с БД
+        return recipients
+
+    conn = None
     try:
         conn = await asyncpg.connect(DATABASE_URL)
-        
-        # Создаём таблицу если нет
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS jobs (
-                id SERIAL PRIMARY KEY,
-                message_id BIGINT,
-                channel VARCHAR(255),
-                text TEXT,
-                text_hash VARCHAR(64),
-                url VARCHAR(500),
-                keywords TEXT[],
-                created_at TIMESTAMP DEFAULT NOW(),
-                sent BOOLEAN DEFAULT FALSE,
-                UNIQUE(channel, message_id)
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_recipients (
+                user_id BIGINT PRIMARY KEY,
+                active BOOLEAN DEFAULT TRUE,
+                updated_at TIMESTAMP DEFAULT NOW()
             )
-        """)
-        
-        # Получаем существующие хеши
-        existing = await conn.fetch("SELECT text_hash, text FROM jobs WHERE created_at > NOW() - INTERVAL '48 hours'")
-        existing_hashes = {r['text_hash'] for r in existing}
-        existing_texts = [r['text'] for r in existing]
-        
-        # Фильтруем и добавляем новые
-        new_jobs = []
-        for job in all_jobs:
-            if job["text_hash"] in existing_hashes:
-                continue
-            
-            if any(is_similar(job["text"], t) for t in existing_texts[:50]):
-                continue
-            
-            try:
-                result = await conn.fetchrow("""
-                    INSERT INTO jobs (message_id, channel, text, text_hash, url, keywords)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (channel, message_id) DO NOTHING
-                    RETURNING id
-                """, job["message_id"], job["channel"], job["text"], job["text_hash"], job["url"], job["keywords"])
-                
-                if result:
-                    job["id"] = result["id"]
-                    new_jobs.append(job)
-                    existing_hashes.add(job["text_hash"])
-            except Exception as e:
-                print(f"[CRON] DB insert error: {e}")
-        
-        await conn.close()
-        
-        print(f"[CRON] New jobs: {len(new_jobs)}")
-        
-        # Отправляем в Telegram ВСЕ найденные (не только новые)
-        bot = Bot(token=BOT_TOKEN)
-        
-        if all_jobs:
-            # Отправляем заголовок
-            header = f"📋 <b>Парсинг завершён</b>\n🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-            header += f"📥 Спарсено сообщений: {total_parsed}\n"
-            header += f"🔍 Прошло фильтр: {len(all_jobs)}\n"
-            header += f"🆕 Новых: {len(new_jobs)}"
-            await bot.send_message(ADMIN_ID, header, parse_mode="HTML")
-            
-            # Отправляем заказы (макс 5)
-            jobs_to_show = new_jobs[:5] if new_jobs else all_jobs[:5]
-            for job in jobs_to_show:
-                text = job["text"][:500] + "..." if len(job["text"]) > 500 else job["text"]
-                msg = f"📌 {text}\n\n🏷 {', '.join(job.get('keywords', []))}\n📢 <a href=\"{job['url']}\">Источник</a>"
-                try:
-                    await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
-                except Exception as e:
-                    print(f"[CRON] Send error: {e}")
+            """
+        )
+        rows = await conn.fetch(
+            "SELECT user_id FROM bot_recipients WHERE active = TRUE ORDER BY updated_at DESC LIMIT 20"
+        )
+        ids = [int(r["user_id"]) for r in rows]
+        if ids:
+            recipients = ids
+    except Exception as exc:
+        print(f"[CRON] get_recipients error: {exc}")
+    finally:
+        if conn:
+            await conn.close()
+
+    # Удаляем дубликаты, сохраняем порядок
+    unique = []
+    for uid in recipients:
+        if uid not in unique:
+            unique.append(uid)
+    return unique
+
+
+async def notify_all(bot: Bot, recipients: list[int], text: str, parse_mode: str | None = None):
+    for uid in recipients:
+        try:
+            await bot.send_message(uid, text, parse_mode=parse_mode)
+        except Exception as exc:
+            print(f"[CRON] send to {uid} failed: {exc}")
+
+
+async def run_parsing(force_recipient_id: int | None = None):
+    """Основная функция парсинга"""
+    print("[CRON] Starting parsing...")
+
+    if not BOT_TOKEN:
+        return {"error": "BOT_TOKEN not set", "parsed": 0, "new": 0}
+
+    parser = TelegramParser()
+    db = Database(DATABASE_URL) if DATABASE_URL else None
+    bot = None
+    parse_run_id = None
+
+    try:
+        recipients = await get_recipients()
+        if force_recipient_id and force_recipient_id not in recipients:
+            recipients.insert(0, force_recipient_id)
+        print(f"[CRON] Recipients: {recipients}")
+
+        if db:
+            await db.init_tables()
+            print("[CRON] DB mode enabled")
         else:
-            await bot.send_message(ADMIN_ID, f"📭 Заказов не найдено\n\nСпарсено сообщений: {total_parsed}\nПрошло фильтр: 0\n\nВозможно каналы недоступны или нет подходящих сообщений")
-        
-        await bot.session.close()
-        
-        return {"parsed": len(all_jobs), "new": len(new_jobs), "status": "success"}
-    
+            print("[CRON] DB mode disabled (DATABASE_URL missing)")
+
+        total_sources = len(CHANNELS)
+        if db:
+            parse_run_id = await db.create_parse_run(
+                sources_total=total_sources,
+                recipients_total=len(recipients),
+            )
+        all_jobs = await parser.parse_all_channels(batch_size=8, per_channel_limit=30)
+        total_filtered = len(all_jobs)
+        print(f"[CRON] Filtered jobs: {total_filtered}")
+
+        bot = Bot(token=BOT_TOKEN)
+
+        if not all_jobs:
+            await notify_all(bot, recipients, "📭 Подходящих заказов/вакансий не найдено")
+            if db and parse_run_id:
+                await db.finish_parse_run(
+                    run_id=parse_run_id,
+                    status="no_jobs",
+                    filtered_total=0,
+                    new_total=0,
+                    sent_total=0,
+                    parser_errors=parser.error_stats,
+                )
+            return {
+                "status": "no jobs found",
+                "sources": total_sources,
+                "parsed": 0,
+                "filtered": 0,
+                "new": 0,
+                "sent": 0,
+                "recipients": len(recipients),
+                "parser_errors": parser.error_stats,
+            }
+
+        new_jobs = []
+        saved_job_ids = []
+
+        if db:
+            existing = await db.get_similar_jobs(hours=48)
+            existing_hashes = {item["text_hash"] for item in existing}
+            existing_texts = [item["text"] for item in existing]
+
+            for job in all_jobs:
+                if job["text_hash"] in existing_hashes:
+                    continue
+
+                is_similar = any(
+                    parser.calculate_similarity(job["text"], old_text) > SIMILARITY_THRESHOLD
+                    for old_text in existing_texts[:1500]
+                )
+                if is_similar:
+                    continue
+
+                job_id = await db.add_job(
+                    message_id=job["message_id"],
+                    channel=job["channel"],
+                    text=job["text"],
+                    text_hash=job["text_hash"],
+                    url=job["url"],
+                    keywords=job.get("keywords", []),
+                    budget_min=job.get("budget_min"),
+                    budget_max=job.get("budget_max"),
+                    currency=job.get("currency"),
+                    contact_raw=job.get("contact_raw"),
+                    is_remote=job.get("is_remote"),
+                    seniority=job.get("seniority"),
+                    match_score=job.get("match_score"),
+                )
+                if job_id:
+                    job["id"] = job_id
+                    new_jobs.append(job)
+                    saved_job_ids.append(job_id)
+                    existing_hashes.add(job["text_hash"])
+                    existing_texts.append(job["text"])
+        else:
+            seen_hashes = set()
+            kept_texts = []
+            for job in all_jobs:
+                if job["text_hash"] in seen_hashes:
+                    continue
+                is_similar = any(
+                    parser.calculate_similarity(job["text"], old_text) > SIMILARITY_THRESHOLD
+                    for old_text in kept_texts[:1500]
+                )
+                if is_similar:
+                    continue
+                new_jobs.append(job)
+                seen_hashes.add(job["text_hash"])
+                kept_texts.append(job["text"])
+
+        header = (
+            "📋 <b>Парсинг завершён</b>\n"
+            f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"🔍 После фильтрации: {total_filtered}\n"
+            f"🆕 Новых: {len(new_jobs)}"
+        )
+        await notify_all(bot, recipients, header, parse_mode="HTML")
+
+        jobs_to_send = new_jobs[:10] if new_jobs else all_jobs[:10]
+        sent_count = 0
+
+        for job in jobs_to_send:
+            text = job["text"][:700] + "..." if len(job["text"]) > 700 else job["text"]
+            msg = (
+                f"📌 {text}\n\n"
+                f"🏷 {', '.join(job.get('keywords', []))}\n"
+                f"📢 <a href=\"{job['url']}\">Источник</a>"
+            )
+            await notify_all(bot, recipients, msg, parse_mode="HTML")
+            sent_count += 1
+
+        if db and parse_run_id:
+            await db.add_jobs_to_parse_run(parse_run_id, saved_job_ids)
+            await db.finish_parse_run(
+                run_id=parse_run_id,
+                status="success",
+                filtered_total=total_filtered,
+                new_total=len(new_jobs),
+                sent_total=sent_count,
+                parser_errors=parser.error_stats,
+            )
+
+        return {
+            "status": "success",
+            "sources": total_sources,
+            "parsed": total_filtered,
+            "filtered": total_filtered,
+            "new": len(new_jobs),
+            "sent": sent_count,
+            "recipients": len(recipients),
+            "parser_errors": parser.error_stats,
+        }
+
     except Exception as e:
         print(f"[CRON] Error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e), "parsed": len(all_jobs), "new": 0}
+        if db and parse_run_id:
+            try:
+                await db.finish_parse_run(
+                    run_id=parse_run_id,
+                    status="error",
+                    filtered_total=0,
+                    new_total=0,
+                    sent_total=0,
+                    parser_errors=parser.error_stats,
+                    error_text=str(e),
+                )
+            except Exception as run_exc:
+                print(f"[CRON] parse_run finalize error: {run_exc}")
+        return {"error": str(e), "status": "error", "parsed": 0, "new": 0}
+
+    finally:
+        try:
+            await parser.close()
+        except Exception:
+            pass
+        try:
+            if bot:
+                await bot.session.close()
+        except Exception:
+            pass
+        try:
+            if db:
+                await db.close()
+        except Exception:
+            pass
 
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        print("[CRON] GET request received")
         try:
-            result = asyncio.run(run_parsing())
+            parsed = urlparse(self.path)
+            qs = parse_qs(parsed.query)
+            recipient_raw = qs.get("recipient_id", [None])[0]
+            force_recipient_id = int(recipient_raw) if recipient_raw and recipient_raw.isdigit() else None
+            result = asyncio.run(run_parsing(force_recipient_id=force_recipient_id))
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
+            self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(result).encode())
         except Exception as e:
-            print(f"[CRON] Handler error: {e}")
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
+            self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(e), "parsed": 0, "new": 0}).encode())
-    
+
     def do_POST(self):
         self.do_GET()
