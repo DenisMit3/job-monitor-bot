@@ -7,11 +7,13 @@ import os
 import re
 import hashlib
 import aiohttp
-import asyncpg
 from http.server import BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from aiogram import Bot
+
+from src.database import Database
+from src.config import SIMILARITY_THRESHOLD
 
 # Конфигурация
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -196,56 +198,39 @@ async def run_parsing():
             await bot.session.close()
         return {"parsed": total_parsed, "new": 0, "status": "no jobs found"}
     
-    # Работа с БД
+    # Работа с БД (используем общий класс Database из src.database)
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        
-        # Создаём таблицу если нет
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS jobs (
-                id SERIAL PRIMARY KEY,
-                message_id BIGINT,
-                channel VARCHAR(255),
-                text TEXT,
-                text_hash VARCHAR(64),
-                url VARCHAR(500),
-                keywords TEXT[],
-                created_at TIMESTAMP DEFAULT NOW(),
-                sent BOOLEAN DEFAULT FALSE,
-                UNIQUE(channel, message_id)
-            )
-        """)
-        
-        # Получаем существующие хеши
-        existing = await conn.fetch("SELECT text_hash, text FROM jobs WHERE created_at > NOW() - INTERVAL '48 hours'")
-        existing_hashes = {r['text_hash'] for r in existing}
-        existing_texts = [r['text'] for r in existing]
-        
-        # Фильтруем и добавляем новые
+        db = Database(DATABASE_URL)
+        await db.init_tables()
+
+        # Получаем существующие вакансии за последние 48 часов
+        existing_jobs = await db.get_similar_jobs(hours=48)
+        existing_hashes = {j["text_hash"] for j in existing_jobs}
+        existing_texts = [j["text"] for j in existing_jobs]
+
         new_jobs = []
         for job in all_jobs:
+            # Проверка по хешу
             if job["text_hash"] in existing_hashes:
                 continue
-            
+
+            # Проверка по схожести текста (ограничиваемся первыми 50 для скорости)
             if any(is_similar(job["text"], t) for t in existing_texts[:50]):
                 continue
-            
-            try:
-                result = await conn.fetchrow("""
-                    INSERT INTO jobs (message_id, channel, text, text_hash, url, keywords)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (channel, message_id) DO NOTHING
-                    RETURNING id
-                """, job["message_id"], job["channel"], job["text"], job["text_hash"], job["url"], job["keywords"])
-                
-                if result:
-                    job["id"] = result["id"]
-                    new_jobs.append(job)
-                    existing_hashes.add(job["text_hash"])
-            except Exception as e:
-                print(f"[CRON] DB insert error: {e}")
-        
-        await conn.close()
+
+            job_id = await db.add_job(
+                message_id=job["message_id"],
+                channel=job["channel"],
+                text=job["text"],
+                text_hash=job["text_hash"],
+                url=job["url"],
+                keywords=job.get("keywords", []),
+            )
+
+            if job_id:
+                job["id"] = job_id
+                new_jobs.append(job)
+                existing_hashes.add(job["text_hash"])
         
         print(f"[CRON] New jobs: {len(new_jobs)}")
         
