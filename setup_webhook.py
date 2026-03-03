@@ -1,15 +1,21 @@
 """
-Скрипт для установки webhook бота
+Скрипт для управления webhook Telegram-бота.
+
+Использует токен бота из переменной окружения BOT_TOKEN,
+чтобы не хранить его в репозитории.
 """
 import asyncio
 import aiohttp
+import os
 import sys
 
-BOT_TOKEN = "8566523315:AAGso2hEaVPX-kvjR40VDZvwk011vfRaUP0"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 
 async def set_webhook(vercel_url: str):
     """Установка webhook"""
+    if not BOT_TOKEN:
+        raise RuntimeError("Переменная окружения BOT_TOKEN не задана")
     webhook_url = f"{vercel_url}/api/webhook"
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
     
@@ -22,6 +28,8 @@ async def set_webhook(vercel_url: str):
 
 async def get_webhook_info():
     """Получение информации о webhook"""
+    if not BOT_TOKEN:
+        raise RuntimeError("Переменная окружения BOT_TOKEN не задана")
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo"
     
     async with aiohttp.ClientSession() as session:
@@ -33,6 +41,8 @@ async def get_webhook_info():
 
 async def delete_webhook():
     """Удаление webhook"""
+    if not BOT_TOKEN:
+        raise RuntimeError("Переменная окружения BOT_TOKEN не задана")
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
     
     async with aiohttp.ClientSession() as session:
@@ -45,9 +55,9 @@ async def delete_webhook():
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python setup_webhook.py set <vercel_url>")
-        print("  python setup_webhook.py info")
-        print("  python setup_webhook.py delete")
+        print("  BOT_TOKEN=<your_token> python setup_webhook.py set <vercel_url>")
+        print("  BOT_TOKEN=<your_token> python setup_webhook.py info")
+        print("  BOT_TOKEN=<your_token> python setup_webhook.py delete")
         sys.exit(1)
     
     command = sys.argv[1]
